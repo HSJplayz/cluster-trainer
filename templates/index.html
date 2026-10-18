@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cluster-trainer</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --ink:#e6e8ee; --muted:#9aa0ad;
+    --accent:#4f8cff; --good:#3fb950; --warn:#f0b429; --bad:#f85149; --line:#262b36; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; padding:28px; }
+  main { max-width:1080px; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  h2 { font-size:1.1rem; border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 12px; }
+  .muted { color:var(--muted); font-size:.86rem; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
+  label { display:block; font-size:.84rem; color:var(--muted); margin:10px 0 4px; }
+  textarea, input[type=number], select { width:100%; background:var(--bg); color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:8px; font:inherit; }
+  textarea { min-height:140px; font-family:ui-monospace,Consolas,monospace; font-size:.8rem; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+  .row > div { flex:1; min-width:110px; }
+  .feats { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:6px; font-size:.9rem; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px;
+    font-weight:600; font-size:.95rem; cursor:pointer; margin-top:14px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .card .n { font-size:1.3rem; font-weight:700; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:780px){ .grid-2 { grid-template-columns:1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:.86rem; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .err { color:var(--bad); background:var(--card); border:1px solid var(--bad); border-radius:8px; padding:10px; margin-top:12px; }
+  #loading { display:none; color:var(--warn); margin-top:12px; }
+  svg { width:100%; height:auto; background:var(--bg); border:1px solid var(--line); border-radius:10px; }
+  .swatch { display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:5px; vertical-align:middle; }
+  .chk { display:flex; align-items:center; gap:6px; margin-top:22px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>cluster-trainer</h1>
+  <p class="muted">k-means and PCA from scratch (numpy). Paste a CSV, choose features and k — the elbow curve, silhouette, cluster profiles and a PCA scatter render locally, no CDN.</p>
+
+  <div class="panel">
+    <label>CSV data (header row required; a sample loads automatically)</label>
+    <textarea id="csv" spellcheck="false"></textarea>
+    <div class="row">
+      <div><label>Cluster count k</label><input type="number" id="k" value="4" min="2" max="15" step="1"></div>
+      <div><label>k_max (elbow)</label><input type="number" id="k_max" value="8" min="2" max="15" step="1"></div>
+      <div class="chk"><input type="checkbox" id="standardize" checked><span class="muted">standardize</span></div>
+      <div class="chk"><input type="checkbox" id="auto_k"><span class="muted">auto-k (best silhouette)</span></div>
+    </div>
+    <label>Features (auto = all numeric)</label>
+    <div id="features" class="feats"></div>
+    <button id="train">Cluster</button>
+    <div id="loading">Fitting…</div>
+    <div id="error"></div>
+  </div>
+
+  <h2>Summary</h2>
+  <div id="cards" class="cards"></div>
+
+  <div class="grid-2">
+    <div>
+      <h2>PCA scatter</h2>
+      <p class="muted" id="pcanote"></p>
+      <div id="scatter"></div>
+    </div>
+    <div>
+      <h2>Elbow &amp; silhouette</h2>
+      <p class="muted">Bars = inertia (lower is tighter); green line = silhouette (higher is better).</p>
+      <div id="elbow"></div>
+    </div>
+  </div>
+
+  <h2>Cluster profiles (mean per feature)</h2>
+  <div id="profile"></div>
+
+  <h2>Centers (original units)</h2>
+  <div id="centers"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const PALETTE = ["#4f8cff", "#3fb950", "#f0b429", "#f85149", "#d2a8ff", "#79c0ff", "#ffa657", "#ff7b72"];
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function gauss(rng){let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+function sampleData() {
+  const rng = mulberry32(11);
+  const centers = [[0,0,0],[6,0.5,1],[1,6,0.5],[6,6,6]];
+  const lines = ["a,b,c"];
+  for (const c of centers) for (let i=0;i<35;i++)
+    lines.push([0,1,2].map(j => (c[j]+gauss(rng)*0.8).toFixed(2)).join(","));
+  return lines.join("\n");
+}
+$("csv").value = sampleData();
+
+function headers(text){const m=text.match(/^(.*?)\r?\n/);return m?m[1].split(",").map(s=>s.trim()).filter(Boolean):[];}
+function refreshColumns(){
+  const cols = headers($("csv").value);
+  const feats = $("features");
+  feats.innerHTML = cols.map(c=>`<label style="display:flex;align-items:center;gap:5px;margin:0;min-width:90px"><input type="checkbox" value="${c}" checked> ${c}</label>`).join("");
+}
+$("csv").addEventListener("input", refreshColumns);
+refreshColumns();
+
+function esc(s){return String(s).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));}
+function svg(w,h,inner){return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;}
+
+$("train").addEventListener("click", async () => {
+  const btn = $("train");
+  btn.disabled = true; $("loading").style.display = "block"; $("error").innerHTML = "";
+  const features = [...$("features").querySelectorAll("input:checked")].map(i=>i.value);
+  const body = {
+    csv: $("csv").value, features,
+    k: parseInt($("k").value,10)||3, k_max: parseInt($("k_max").value,10)||8,
+    standardize: $("standardize").checked, auto_k: $("auto_k").checked, seed: 42
+  };
+  try {
+    const res = await fetch("/api/cluster", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "clustering failed");
+    render(data);
+  } catch (err) {
+    $("error").innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; $("loading").style.display = "none";
+  }
+});
+
+function render(data) {
+  const ov = data.overview;
+  $("cards").innerHTML = [
+    ["k", ov.k + (ov.auto_k ? " (auto)" : "")],
+    ["Rows", ov.rows],
+    ["Features", ov.features.length],
+    ["Inertia", data.inertia.toFixed(1)],
+    ["Silhouette", data.silhouette === null ? "—" : data.silhouette.toFixed(3)],
+    ["Standardized", ov.standardized ? "yes" : "no"],
+  ].map(([k,v])=>`<div class="card"><div class="muted">${k}</div><div class="n">${v}</div></div>`).join("");
+
+  $("pcanote").innerHTML = `First two principal components explain <strong>${(data.pca.explained_variance_ratio.reduce((a,b)=>a+b,0)*100).toFixed(1)}%</strong> of variance.`;
+  $("scatter").innerHTML = scatterSvg(data);
+  $("elbow").innerHTML = elbowSvg(data);
+  $("profile").innerHTML = tableSvg(data.profile.map(p=>({c:p.cluster, size:p.size, means:p.means})), ov.features, true);
+  const centerRows = data.centroids.map((cen,i)=>({c:i, means:Object.fromEntries(ov.features.map((f,j)=>[f,cen[j]]))}));
+  $("centers").innerHTML = tableSvg(centerRows, ov.features, false);
+}
+
+function clusterColor(c){return PALETTE[c % PALETTE.length];}
+
+function scatterSvg(data){
+  const W=560,H=380,PAD=36;
+  const xs=data.pca.x, ys=data.pca.y;
+  const xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys);
+  const sx=(xmax-xmin)||1, sy=(ymax-ymin)||1;
+  const xat=v=>PAD+(v-xmin)/sx*(W-PAD-14), yat=v=>(H-PAD)-(v-ymin)/sy*(H-PAD-14);
+  let inner=`<line x1="${PAD}" y1="${H-PAD}" x2="${W-14}" y2="${H-PAD}" stroke="#3a4252"/>
+             <line x1="${PAD}" y1="14" x2="${PAD}" y2="${H-PAD}" stroke="#3a4252"/>`;
+  inner += xs.map((v,i)=>`<circle cx="${xat(v)}" cy="${yat(ys[i])}" r="4" fill="${clusterColor(data.pca.cluster[i])}" opacity="0.85" stroke="#0f1115" stroke-width="0.6"/>`).join("");
+  inner += `<text x="${(W+PAD)/2}" y="${H-6}" fill="#9aa0ad" font-size="11" text-anchor="middle">PC1</text>
+            <text x="12" y="${H/2}" fill="#9aa0ad" font-size="11" text-anchor="middle" transform="rotate(-90 12 ${H/2})">PC2</text>`;
+  return svg(W,H,inner);
+}
+
+function elbowSvg(data){
+  const c=data.elbow, W=560,H=380,PAD=40, right=W-16, top=16, bottom=H-PAD;
+  const ks=c.k, inert=c.inertia, sil=c.silhouette;
+  const iMax=Math.max(...inert)||1;
+  const bw=(right-PAD)/ks.length;
+  let inner=`<line x1="${PAD}" y1="${bottom}" x2="${right}" y2="${bottom}" stroke="#3a4252"/>
+             <line x1="${PAD}" y1="${top}" x2="${PAD}" y2="${bottom}" stroke="#3a4252"/>`;
+  inner += ks.map((k,i)=>{
+    const h=(inert[i]/iMax)*(bottom-top), x=PAD+i*bw, y=bottom-h;
+    return `<rect x="${(x+bw*0.15).toFixed(1)}" y="${y.toFixed(1)}" width="${(bw*0.7).toFixed(1)}" height="${h.toFixed(1)}" fill="#4f8cff" opacity="0.55"/>
+            <text x="${(x+bw/2).toFixed(1)}" y="${bottom+14}" text-anchor="middle" fill="#9aa0ad" font-size="10">${k}</text>`;
+  }).join("");
+  // silhouette line (0..1 mapped)
+  const pts = ks.map((k,i)=>{
+    if (sil[i]===null) return null;
+    const x=PAD+i*bw+bw/2, y=bottom-(sil[i])*(bottom-top);
+    return [x,y];
+  }).filter(Boolean);
+  if (pts.length) {
+    inner += `<path d="M${pts.map(p=>p.map(v=>v.toFixed(1)).join(" ")).join(" L")}" stroke="#3fb950" stroke-width="2.5" fill="none"/>`;
+    inner += pts.map(p=>`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#3fb950"/>`).join("");
+  }
+  inner += `<text x="${(W+PAD)/2}" y="${H-6}" fill="#9aa0ad" font-size="11" text-anchor="middle">k</text>
+            <text x="${right}" y="${top+12}" text-anchor="end" fill="#3fb950" font-size="10">silhouette</text>
+            <text x="${PAD+4}" y="${top+12}" fill="#4f8cff" font-size="10">inertia</text>`;
+  return svg(W,H,inner);
+}
+
+function tableSvg(rows, features, showSize, sizes){
+  const head = `<tr><th>cluster</th>${showSize?"<th>size</th>":""}${features.map(f=>`<th>${esc(f)}</th>`).join("")}</tr>`;
+  const body = rows.map(r=>`<tr><td><span class="swatch" style="background:${clusterColor(r.c)}"></span>${r.c}</td>${showSize?`<td>${r.size}</td>`:""}${features.map(f=>`<td>${r.means[f]}</td>`).join("")}</tr>`).join("");
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+</script>
+</body>
+</html>
